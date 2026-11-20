@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cmath>
 #include <locale>
-#include <optional>
 #include <sstream>
 #include <stdexcept>
 
@@ -71,35 +70,64 @@ std::vector<std::string> split(std::string_view text, std::string_view delimiter
     return parts;
 }
 
-struct FoodQuery {
-    std::string name;
-    std::optional<double> grams;
+enum class Unit {
+    Grams,
+    Kilograms,
+    Pieces,
 };
 
-FoodQuery parseItem(const std::string& text) {
+struct FoodQuery {
+    std::string name;
+    double amount;
+    Unit unit;
+};
+
+std::optional<FoodQuery> parseItem(const std::string& text) {
     const auto amountEnd = text.find_first_not_of("0123456789.,");
     if (amountEnd == 0 || amountEnd == std::string::npos) {
-        return {text, std::nullopt};
+        return std::nullopt;
     }
     const auto amount = number(text.substr(0, amountEnd));
     if (!amount || *amount <= 0) {
-        return {text, std::nullopt};
+        return std::nullopt;
     }
 
-    std::string remainder = normalize(std::string_view(text).substr(amountEnd));
+    const auto remainder = normalize(std::string_view(text).substr(amountEnd));
     const auto unitEnd = remainder.find(' ');
-    if (unitEnd == std::string::npos) {
-        return {text, std::nullopt};
+    const auto unit = remainder.substr(0, unitEnd);
+    if (unitEnd != std::string::npos) {
+        const auto name = remainder.substr(unitEnd + 1);
+        if (unit == "г") {
+            return FoodQuery{name, *amount, Unit::Grams};
+        }
+        if (unit == "кг") {
+            return FoodQuery{name, *amount, Unit::Kilograms};
+        }
+        if (unit == "шт" || unit == "шт.") {
+            return FoodQuery{name, *amount, Unit::Pieces};
+        }
     }
 
-    const auto unit = remainder.substr(0, unitEnd);
-    if (unit == "г") {
-        return {remainder.substr(unitEnd + 1), amount};
+    // В «2 яйца» слово «штуки» подразумевается.
+    if (text[amountEnd] == ' ') {
+        return FoodQuery{remainder, *amount, Unit::Pieces};
     }
-    if (unit == "кг" && std::isfinite(*amount * 1000)) {
-        return {remainder.substr(unitEnd + 1), *amount * 1000};
+    return std::nullopt;
+}
+
+std::optional<double> weightInGrams(const FoodQuery& query, const Food& food) {
+    switch (query.unit) {
+        case Unit::Grams:
+            return query.amount;
+        case Unit::Kilograms:
+            return query.amount * 1000;
+        case Unit::Pieces:
+            if (food.pieceGrams) {
+                return query.amount * *food.pieceGrams;
+            }
+            return std::nullopt;
     }
-    return {text, std::nullopt};
+    return std::nullopt;
 }
 
 }
@@ -115,8 +143,8 @@ KnowledgeGraph::KnowledgeGraph(std::istream& input) {
 
         const auto fields = split(line, "|");
         const auto location = "Строка " + std::to_string(lineNumber);
-        if (fields.size() != 5 || normalize(fields[0]).empty()) {
-            throw std::runtime_error(location + ": ожидаются 5 полей и название продукта");
+        if ((fields.size() != 5 && fields.size() != 6) || normalize(fields[0]).empty()) {
+            throw std::runtime_error(location + ": ожидаются 5 или 6 полей, первое — название продукта");
         }
 
         const auto kcal = number(normalize(fields[2]));
@@ -124,6 +152,14 @@ KnowledgeGraph::KnowledgeGraph(std::istream& input) {
         const auto portion = number(normalize(fields[4]));
         if (!kcal || !protein || !portion || *portion <= 0) {
             throw std::runtime_error(location + ": неверные пищевые значения или размер порции");
+        }
+
+        std::optional<double> pieceGrams;
+        if (fields.size() == 6 && !normalize(fields[5]).empty()) {
+            pieceGrams = number(normalize(fields[5]));
+            if (!pieceGrams || *pieceGrams <= 0) {
+                throw std::runtime_error(location + ": неверный вес одной штуки");
+            }
         }
 
         auto names = split(fields[1], ";");
@@ -134,7 +170,7 @@ KnowledgeGraph::KnowledgeGraph(std::istream& input) {
                 throw std::runtime_error(location + ": повторяющееся название «" + key + "»");
             }
         }
-        foods_.push_back({fields[0], {*kcal, *protein}, *portion});
+        foods_.push_back({fields[0], {*kcal, *protein}, *portion, pieceGrams});
     }
     if (input.bad() || foods_.empty()) {
         throw std::runtime_error("Не удалось прочитать каталог продуктов");
@@ -157,25 +193,27 @@ std::vector<MealItem> analyzeMeal(const KnowledgeGraph& graph, std::string_view 
         }
 
         const auto* food = graph.find(text);
-        std::optional<double> explicitGrams;
-        if (!food) {
-            const auto query = parseItem(text);
-            food = graph.find(query.name);
-            explicitGrams = query.grams;
+        std::optional<double> grams;
+        if (food) {
+            grams = food->portionGrams;
+        } else if (const auto query = parseItem(text)) {
+            food = graph.find(query->name);
+            if (food) {
+                grams = weightInGrams(*query, *food);
+            }
         }
-        if (!food) {
+        if (!grams || !std::isfinite(*grams) || *grams <= 0) {
             items.push_back({text, "", 0, {}});
             continue;
         }
 
-        const double grams = explicitGrams.value_or(food->portionGrams);
-        const double factor = grams / 100;
+        const double factor = *grams / 100;
         const Nutrients nutrients{food->per100.kcal * factor, food->per100.protein * factor};
         if (!std::isfinite(nutrients.kcal) || !std::isfinite(nutrients.protein)) {
             items.push_back({text, "", 0, {}});
             continue;
         }
-        items.push_back({text, food->name, grams, nutrients});
+        items.push_back({text, food->name, *grams, nutrients});
     }
     return items;
 }

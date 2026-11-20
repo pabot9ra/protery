@@ -1,6 +1,7 @@
 #pragma once
 
 #include <istream>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -17,6 +18,7 @@ struct Food {
     std::string name;
     Nutrients per100;
     double portionGrams;
+    std::optional<double> pieceGrams = std::nullopt;
 };
 
 struct MealItem {
