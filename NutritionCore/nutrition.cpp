@@ -82,13 +82,65 @@ struct FoodQuery {
     Unit unit;
 };
 
-std::optional<FoodQuery> parseItem(const std::string& text) {
-    const auto amountEnd = text.find_first_not_of("0123456789.,");
-    if (amountEnd == 0 || amountEnd == std::string::npos) {
-        return std::nullopt;
+struct WrittenAmount {
+    double value;
+    std::size_t end;
+};
+
+WrittenAmount parseWrittenAmount(std::string_view text) {
+    static const std::unordered_map<std::string_view, int> values{
+        {"один", 1}, {"одна", 1}, {"одно", 1}, {"одну", 1}, {"два", 2}, {"две", 2},
+        {"три", 3}, {"четыре", 4}, {"пять", 5}, {"шесть", 6}, {"семь", 7},
+        {"восемь", 8}, {"девять", 9}, {"десять", 10}, {"одиннадцать", 11},
+        {"двенадцать", 12}, {"тринадцать", 13}, {"четырнадцать", 14}, {"пятнадцать", 15},
+        {"шестнадцать", 16}, {"семнадцать", 17}, {"восемнадцать", 18}, {"девятнадцать", 19},
+        {"двадцать", 20}, {"тридцать", 30}, {"сорок", 40}, {"пятьдесят", 50},
+        {"шестьдесят", 60}, {"семьдесят", 70}, {"восемьдесят", 80}, {"девяносто", 90},
+        {"сто", 100}, {"двести", 200}, {"триста", 300}, {"четыреста", 400},
+        {"пятьсот", 500}, {"шестьсот", 600}, {"семьсот", 700}, {"восемьсот", 800},
+        {"девятьсот", 900},
+    };
+
+    auto end = text.find(' ');
+    const auto firstWord = text.substr(0, end);
+    if (firstWord == "полтора" || firstWord == "полторы") {
+        return {1.5, end};
     }
-    const auto amount = number(text.substr(0, amountEnd));
-    if (!amount || *amount <= 0) {
+
+    // После сотен идут десятки или 1–19, после десятков — только 1–9.
+    WrittenAmount amount{0, 0};
+    int limit = 1000;
+    std::size_t start = 0;
+    // Последнее слово оставляем для имени продукта или единицы.
+    while (end != std::string_view::npos) {
+        const auto word = values.find(text.substr(start, end - start));
+        if (word == values.end() || word->second >= limit) {
+            break;
+        }
+        const int part = word->second;
+        amount.value += part;
+        amount.end = end;
+        if (part < 20) {
+            break;
+        }
+        limit = part >= 100 ? 100 : 10;
+        start = end + 1;
+        end = text.find(' ', start);
+    }
+    return amount;
+}
+
+std::optional<FoodQuery> parseItem(const std::string& text) {
+    auto amountEnd = text.find_first_not_of("0123456789.,");
+    std::optional<double> amount;
+    if (amountEnd == 0) {
+        const auto written = parseWrittenAmount(text);
+        amountEnd = written.end;
+        amount = written.value;
+    } else if (amountEnd != std::string::npos) {
+        amount = number(text.substr(0, amountEnd));
+    }
+    if (!amount || *amount <= 0 || amountEnd == std::string::npos) {
         return std::nullopt;
     }
 
@@ -97,13 +149,14 @@ std::optional<FoodQuery> parseItem(const std::string& text) {
     const auto unit = remainder.substr(0, unitEnd);
     if (unitEnd != std::string::npos) {
         const auto name = remainder.substr(unitEnd + 1);
-        if (unit == "г") {
+        if (unit == "г" || unit == "грамм" || unit == "грамма" || unit == "граммов") {
             return FoodQuery{name, *amount, Unit::Grams};
         }
-        if (unit == "кг") {
+        if (unit == "кг" || unit == "килограмм" || unit == "килограмма" || unit == "килограммов") {
             return FoodQuery{name, *amount, Unit::Kilograms};
         }
-        if (unit == "шт" || unit == "шт.") {
+        if (unit == "шт" || unit == "шт." || unit == "штука" || unit == "штуку" ||
+            unit == "штуки" || unit == "штук") {
             return FoodQuery{name, *amount, Unit::Pieces};
         }
     }
